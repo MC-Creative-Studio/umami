@@ -39,6 +39,10 @@ export interface RawQueryClient extends RawQueryExecutor {
   $replica?: () => unknown;
 }
 
+interface TransactionalRawQueryClient extends RawQueryExecutor {
+  $transaction<T>(callback: (tx: RawQueryExecutor) => Promise<T>): Promise<T>;
+}
+
 function isRawQueryExecutor(value: unknown): value is RawQueryExecutor {
   return (
     !!value &&
@@ -755,7 +759,12 @@ async function executeRawQuery(
   });
 
   if (schema) {
-    await queryClient.$executeRawUnsafe(`SET search_path TO "${schema}";`);
+    // Transaction poolers may assign separate statements to different backends.
+    // Keep the schema and query on one connection, without leaking session state.
+    return (queryClient as TransactionalRawQueryClient).$transaction(async tx => {
+      await tx.$executeRawUnsafe(`SET LOCAL search_path TO "${schema.replaceAll('"', '""')}";`);
+      return tx.$queryRawUnsafe(query, ...params);
+    });
   }
 
   return queryClient.$queryRawUnsafe(query, ...params);
@@ -776,18 +785,18 @@ async function pagedQuery<T>(model: string, criteria: T, filters?: QueryFilters)
   // Independent queries; run concurrently (mirrors pagedRawQuery).
   const [data, count] = await Promise.all([
     client[model].findMany({
-    ...criteria,
-    ...{
-      ...(size > 0 && { take: +size, skip: +size * (+page - 1) }),
-      ...(orderBy && {
-        orderBy: [
-          {
-            [orderBy]: sortDescending ? 'desc' : 'asc',
-          },
-        ],
-      }),
-    },
-  }),
+      ...criteria,
+      ...{
+        ...(size > 0 && { take: +size, skip: +size * (+page - 1) }),
+        ...(orderBy && {
+          orderBy: [
+            {
+              [orderBy]: sortDescending ? 'desc' : 'asc',
+            },
+          ],
+        }),
+      },
+    }),
     client[model].count({ where: (criteria as any).where }),
   ]);
 
@@ -952,3 +961,4 @@ export default {
   rawQuery,
   writeRawQuery,
 };
+

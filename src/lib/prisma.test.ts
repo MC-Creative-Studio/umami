@@ -15,7 +15,9 @@ vi.mock('@/generated/prisma/client', () => ({
   PrismaClient: class PrismaClient {
     $executeRawUnsafe = vi.fn();
     $queryRawUnsafe = vi.fn();
-    $transaction = vi.fn();
+    $transaction = vi.fn(async (input: any) =>
+      typeof input === 'function' ? input(this) : Promise.all(input),
+    );
     $on = vi.fn();
     $extends() {
       return this;
@@ -28,6 +30,40 @@ let prisma!: typeof import('./prisma').default;
 
 beforeAll(async () => {
   ({ getRawQueryClient, default: prisma } = await import('./prisma'));
+});
+
+describe('custom schema queries with transaction pooling', () => {
+  test('pins schema selection and parameterized reads to the same transaction', async () => {
+    const originalUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = 'postgresql://user:pass@localhost:6543/postgres?schema=umami';
+    const connection = {
+      $executeRawUnsafe: vi.fn(async () => 0),
+      $queryRawUnsafe: vi.fn(async () => [{ views: 2 }]),
+    };
+    const root = prisma.client as any;
+    root.$executeRawUnsafe.mockClear();
+    root.$queryRawUnsafe.mockClear();
+    root.$transaction.mockImplementationOnce(async (work: any) => work(connection));
+    try {
+      const result = await prisma.rawQuery('select {{websiteId}} as website_id', {
+        websiteId: 'portfolio',
+      });
+      expect(result).toEqual([{ views: 2 }]);
+      expect(connection.$executeRawUnsafe).toHaveBeenCalledWith(
+        'SET LOCAL search_path TO "umami";',
+      );
+      expect(connection.$queryRawUnsafe).toHaveBeenCalledWith(
+        'select $1 as website_id',
+        'portfolio',
+      );
+      expect(root.$executeRawUnsafe).not.toHaveBeenCalled();
+      expect(root.$queryRawUnsafe).not.toHaveBeenCalled();
+    } finally {
+      process.env.DATABASE_URL = originalUrl;
+      root.$transaction.mockReset();
+      root.$transaction.mockImplementation(async (work: any) => work(root));
+    }
+  });
 });
 
 interface RawQueryClient {
@@ -259,3 +295,4 @@ describe('paged query concurrency', () => {
     }
   });
 });
+
