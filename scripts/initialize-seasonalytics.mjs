@@ -33,6 +33,19 @@ if (schema !== 'umami') {
   throw new Error('Seasonalytics requires a dedicated umami database schema.');
 }
 
+const archivedIds = JSON.parse(process.env.SEASONALYTICS_ARCHIVED_WEBSITE_IDS || '[]');
+if (
+  !Array.isArray(archivedIds) ||
+  archivedIds.some(
+    id => typeof id !== 'string' || !/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(id),
+  )
+) {
+  throw new Error('SEASONALYTICS_ARCHIVED_WEBSITE_IDS must contain valid website IDs.');
+}
+if (sites.some(site => archivedIds.includes(site.id))) {
+  throw new Error('Archived website IDs must not include active registry entries.');
+}
+
 const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString }, { schema }),
 });
@@ -53,6 +66,15 @@ try {
         await tx.user.update({
           where: { id: admin.id },
           data: { password: await bcrypt.hash(password, 12) },
+        });
+      }
+
+      // Soft-archive only this administrator's explicitly excluded entries.
+      // Keep analytics history so the action can be reversed without data loss.
+      if (archivedIds.length) {
+        await tx.website.updateMany({
+          where: { id: { in: archivedIds }, userId: admin.id, deletedAt: null },
+          data: { deletedAt: new Date() },
         });
       }
 
@@ -80,4 +102,3 @@ try {
 } finally {
   await prisma.$disconnect();
 }
-
